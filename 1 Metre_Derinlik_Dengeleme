@@ -1,0 +1,99 @@
+from pymavlink import mavutil
+import time
+time.sleep(15)
+
+# ✅ Başlangıçta 15 saniye bekle (Pixhawk açılması için)
+print("⏳ Pixhawk açılması için 15 saniye bekleniyor...")
+
+# ✅ Pixhawk bağlantısını başlat (portu sistemine göre değiştir)
+print("📡 Pixhawk bağlantısı bekleniyor...")
+master = mavutil.mavlink_connection('/dev/ttyACM0', baud=57600)
+master.wait_heartbeat()
+print("✅ Pixhawk bağlantısı kuruldu!")
+
+# 🔒 Motorları ARM ET (güvenlik nedeniyle bağlantıdan hemen sonra)
+master.arducopter_arm()
+master.motors_armed_wait()
+print("✅ Motorlar ARM edildi!")
+
+# PID sabitleri
+Kp = 900.0
+Ki = 65.0
+Kd = 1000.0
+
+hedef_derinlik = 1.0  # metre cinsinden, 5 cm
+integral = 0.0
+previous_error = 0.0
+last_time = time.time()
+
+P0 = -1  # ilk atmosfer basıncı
+
+# PWM gönderme fonksiyonu
+def pwm_gonder(motor_no, pwm):
+    pwm = max(min(pwm, 1900), 1100)
+    master.mav.command_long_send(
+        target_system=1,
+        target_component=1,
+        command=mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+        confirmation=0,
+        param1=motor_no,
+        param2=pwm,
+        param3=0,
+        param4=0,
+        param5=0,
+        param6=0,
+        param7=0
+    )
+    print(f"⚙️ motor{motor_no} → {pwm} PWM")
+
+# Basınçtan derinlik hesaplama
+def hesapla_derinlik(basinc_hPa):
+    global P0
+    rho = 997.0
+    g = 9.80665
+    if P0 < 0:
+        P0 = basinc_hPa
+        print(f"🔧 İlk basınç P0: {P0:.2f} hPa")
+
+    P = (basinc_hPa - P0) * 100.0
+    h = P / (rho * g)
+    return max(h, 0)
+
+# PID kontrol ve motorlara PWM gönderme
+def kontrol_motor_pid(olculen_derinlik):
+    global integral, previous_error, last_time
+    now = time.time()
+    dt = now - last_time
+    if dt <= 0.005:
+        return
+    last_time = now
+
+    error = hedef_derinlik - olculen_derinlik
+    integral += error * dt
+    derivative = (error - previous_error) / dt
+    previous_error = error
+
+    output = Kp * error + Ki * integral + Kd * derivative
+
+    if abs(output) < 100 and abs(error) > 0.005:
+        output = 70 if output > 0 else -100
+
+    pwm = int(1500 + output)
+    print(f"📏 Derinlik: {olculen_derinlik:.3f} m | PWM: {pwm}")
+    pwm_gonder(5, pwm)  # Ön sağ
+    pwm_gonder(6, pwm)  # Ön sol
+    pwm_gonder(7, pwm)  # Arka sağ
+    pwm_gonder(8, pwm)  # Arka sol
+
+
+# 🔁 Ana döngü
+print("🔁 Basınç dinleniyor...")
+while True:
+    msg = master.recv_match(type='SCALED_PRESSURE2', blocking=True, timeout=5)
+    if msg is None:
+        print("⚠️ SCALED_PRESSURE2 verisi alınamadı! Pixhawk parametrelerini kontrol et.")
+        continue
+
+    basinc_hPa = msg.press_abs
+    derinlik = hesapla_derinlik(basinc_hPa)
+    kontrol_motor_pid(derinlik)
