@@ -1,3 +1,6 @@
+PİXHAWK 2.4.8 İÇİN
+
+
 from pymavlink import mavutil
 import time
 time.sleep(15)
