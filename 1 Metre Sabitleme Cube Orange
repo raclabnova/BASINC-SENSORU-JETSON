@@ -1,0 +1,104 @@
+****** PİXHAWK CUBE ORANGE İÇİN 1M SABİTLEME KODU
+
+from pymavlink import mavutil
+import time
+
+print("⏳ Pixhawk açılması için 15 saniye bekleniyor...")
+time.sleep(15)
+
+# Pixhawk bağlantısı
+print("📡 Pixhawk bağlantısı bekleniyor...")
+master = mavutil.mavlink_connection('/dev/ttyACM0', baud=57600)
+master.wait_heartbeat()
+print("✅ Pixhawk bağlantısı kuruldu!")
+
+# AHRS2 mesajını aktif et
+master.mav.command_long_send(
+    target_system=1,
+    target_component=1,
+    command=mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+    confirmation=0,
+    param1=178,           # AHRS2 ID
+    param2=200000,        # 200ms = 5Hz
+    param3=0, param4=0, param5=0, param6=0, param7=0
+)
+print("📡 AHRS2 mesajı aktif edildi!")
+
+# Motorları ARM et
+master.arducopter_arm()
+master.motors_armed_wait()
+print("✅ Motorlar ARM edildi!")
+
+# PID sabitleri
+Kp = 850.0
+Ki = 65.0
+Kd = 1000.0
+
+hedef_derinlik = 0.7  # 1 metre hedef
+integral = 0.0
+previous_error = 0.0
+last_time = time.time()
+ilk_altitude = None
+
+# PWM gönderme
+def pwm_gonder(motor_no, pwm):
+    pwm = max(min(pwm, 1900), 1100)
+    master.mav.command_long_send(
+        target_system=1,
+        target_component=1,
+        command=mavutil.mavlink.MAV_CMD_DO_SET_SERVO,
+        confirmation=0,
+        param1=motor_no,
+        param2=pwm,
+        param3=0,
+        param4=0,
+        param5=0,
+        param6=0,
+        param7=0
+    )
+    print(f"⚙️ motor{motor_no} → {pwm} PWM")
+
+# PID kontrol
+def kontrol_motor_pid(derinlik):
+    global integral, previous_error, last_time
+    now = time.time()
+    dt = now - last_time
+    if dt <= 0.005:
+        return
+    last_time = now
+
+    error = hedef_derinlik - derinlik  # 1m altındaysa hata pozitif
+    integral += error * dt
+    derivative = (error - previous_error) / dt
+    previous_error = error
+
+    output = Kp * error + Ki * integral + Kd * derivative
+
+    # Ufak hatalarda küçük kuvvet uygula
+    if abs(output) < 100 and abs(error) > 0.01:
+        output = 70 if output > 0 else -100
+
+    pwm = int(1500 + output)
+    pwm = max(min(pwm, 1900), 1100)
+
+    print(f"📏 Göreli Derinlik: {derinlik:.3f} m | Hedef: {hedef_derinlik:.2f} m | PWM: {pwm}")
+    for motor in [5, 6, 7, 8]:
+        pwm_gonder(motor, pwm)
+
+# AHRS2 dinle ve göreli derinlik hesapla
+print("🔁 AHRS2 mesajları dinleniyor...")
+while True:
+    msg = master.recv_match(type='AHRS2', blocking=True, timeout=5)
+    if msg is None:
+        print("⚠️ AHRS2 verisi alınamadı!")
+        continue
+
+    altitude = msg.altitude
+    if ilk_altitude is None:
+        ilk_altitude = altitude
+        print(f"📍 Başlangıç altitudesi referans alındı: {ilk_altitude:.2f} m")
+
+    # Göreli derinlik: ne kadar aşağı indik?
+    derinlik = ilk_altitude - altitude
+
+    kontrol_motor_pid(derinlik)
